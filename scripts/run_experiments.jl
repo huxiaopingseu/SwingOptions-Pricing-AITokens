@@ -44,7 +44,7 @@ res["base_params"] = Dict(
     "S0" => exp(x0), "x0" => x0, "ln_fee" => log(c.fee))
 
 println("== 1. Reference (high-resolution DCT) ==")
-ref = reservation_prices(p, c, ag; Nx=1024, Nu=256, nq=256, L=8.0, x0=x0)
+ref = reservation_prices(p, c, ag; Nx=1024, Nu=512, nq=512, L=8.0, x0=x0)
 res["reference"] = Dict("P_B" => ref.P_B, "P_S" => ref.P_S, "P_star" => ref.P_star)
 println("   P_B_ref = ", ref.P_B, "  P_S_ref = ", ref.P_S)
 
@@ -55,7 +55,7 @@ println("== 2. DCT convergence ==")
 Nx_list = [64, 128, 256, 512, 1024]
 conv = Dict("Nx" => Nx_list, "P_B" => Float64[], "P_S" => Float64[], "P_star" => Float64[])
 for Nx in Nx_list
-    r = reservation_prices(p, c, ag; Nx=Nx, Nu=256, nq=256, L=8.0, x0=x0)
+    r = reservation_prices(p, c, ag; Nx=Nx, Nu=512, nq=512, L=8.0, x0=x0)
     push!(conv["P_B"], r.P_B); push!(conv["P_S"], r.P_S); push!(conv["P_star"], r.P_star)
     println("   Nx=", Nx, "  P_B=", round(r.P_B, digits=5), "  P_S=", round(r.P_S, digits=5))
 end

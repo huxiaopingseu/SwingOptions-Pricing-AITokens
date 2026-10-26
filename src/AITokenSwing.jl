@@ -36,7 +36,7 @@ end
 export ExpOUJumpParams, ContractSpec, AgentParams,
        truncation_domain, log_charfun,
        solve_buyer_dct, solve_seller_dct, solve_spot_dct, seller_ratio,
-       reservation_prices, nash_price,
+       reservation_prices, nash_price, eval_cos,
        free_boundary, free_boundary_grid,
        solve_buyer_lsm, lsm_reservation_price, lsm_free_boundary,
        simulate_X, bench_dct
@@ -108,6 +108,8 @@ struct CosExpect
     buf::Vector{Float64}        # scratch, length N
     out::Vector{Float64}        # scratch, length N
     N::Int
+    a::Float64                  # truncation domain [a, b]
+    b::Float64
 end
 
 function CosExpect(p::ExpOUJumpParams, dt::Float64, a::Float64, b::Float64, N::Int)
@@ -125,7 +127,7 @@ function CosExpect(p::ExpOUJumpParams, dt::Float64, a::Float64, b::Float64, N::I
     A[:, 1] .*= 0.5
     buf = zeros(Float64, N)
     plan = FFTW.plan_r2r(buf, FFTW.REDFT10)
-    return CosExpect(A, plan, buf, zeros(Float64, N), N)
+    return CosExpect(A, plan, buf, zeros(Float64, N), N, a, b)
 end
 
 # apply expectation to a single column vector v (length N), writing into out (length N)
@@ -133,6 +135,19 @@ function expect_col!(ce::CosExpect, v::AbstractVector{Float64}, out::AbstractVec
     mul!(ce.buf, ce.plan, v)          # DCT-II coefficients
     mul!(out, ce.A, ce.buf)           # dense reconstruction
     return out
+end
+
+# spectrally-accurate evaluation of a value-function column V (grid values on the
+# midpoint grid) at an arbitrary point x, via the COS series  V(x) = sum' V_m cos(...).
+function eval_cos(ce::CosExpect, V::AbstractVector{Float64}, x::Float64)
+    mul!(ce.buf, ce.plan, V)          # DCT-II coefficients D_m
+    w0 = pi / (ce.b - ce.a)
+    s = 0.0
+    @inbounds for m in 0:ce.N-1
+        half = (m == 0) ? 0.5 : 1.0
+        s += half * ce.buf[m+1] * cos(m * w0 * (x - ce.a))
+    end
+    return s / ce.N
 end
 
 # ---------------------------------------------------------------------------
@@ -210,8 +225,8 @@ function solve_buyer_dct(p::ExpOUJumpParams, c::ContractSpec, ag::AgentParams;
         Vnext, Vcurr = Vcurr, Vnext   # swap buffers (no allocation)
     end
 
-    # V_tilde at t_0, evaluated at (x0, u=0) via linear interpolation in x
-    price = price_at_x0(Vnext, gridX, x0, 1)
+    # V_tilde at t_0, evaluated at (x0, u=0) via the spectrally-accurate COS series
+    price = price_at_x0(ce, Vnext, x0, 1)
     return BuyerSolution(Vnext, gridX, gridU, policy, price)
 end
 
@@ -253,14 +268,19 @@ function buyer_step!(Vcurr, Vnext, policy, E, D, ce, expfac, qgrid, nfeas, j0tab
     return nothing
 end
 
-# helper: linear interpolation of matrix col j at coordinate x
-function price_at_x0(V::Matrix{Float64}, gridX::Vector{Float64}, x0::Float64, j::Int)
-    Nx = length(gridX)
-    dx = gridX[2] - gridX[1]
-    idx = (x0 - gridX[1]) / dx + 1.0
-    i0 = clamp(trunc(Int, idx), 1, Nx - 1)
-    frac = idx - i0
-    return V[i0, j] * (1.0 - frac) + V[i0 + 1, j] * frac
+# spectrally-accurate evaluation of matrix column j at coordinate x (via the COS series),
+# with a linear-interpolation fallback for points near a free boundary where the COS
+# series exhibits Gibbs oscillation and returns an unphysical negative value.
+function price_at_x0(ce::CosExpect, V::Matrix{Float64}, x0::Float64, j::Int)
+    val = eval_cos(ce, @view(V[:, j]), x0)
+    if val <= 0.0
+        dx = (ce.b - ce.a) / ce.N
+        idx = (x0 - ce.a) / dx - 0.5
+        i0 = clamp(floor(Int, idx), 0, ce.N - 2)
+        frac = idx - i0
+        val = V[i0+1, j] * (1.0 - frac) + V[i0+2, j] * frac
+    end
+    return val
 end
 
 # ---------------------------------------------------------------------------
@@ -279,8 +299,8 @@ function seller_ratio(p::ExpOUJumpParams, c::ContractSpec, ag::AgentParams,
     gridU = [(j - 1) * du for j in 1:Nu]
     Sgrid = exp.(gridX)
 
-    # per-period seller profit factors (economically sensible: the seller sells
-    # on spot only when S > c_s, i.e. no production at a loss)
+    # per-period seller profit factors (spot-option baseline: the seller produces
+    # only when the spot price exceeds variable cost, so V_sp is bounded in (0,1])
     #   spot baseline : pi_spot = (S - c_s)_+ * Kmax
     #   with contract : pi_S    = (fee - c_s) q + (S - c_s)_+ (Kmax - q)
     spotfac = zeros(Float64, Nx)
@@ -327,13 +347,32 @@ function seller_ratio(p::ExpOUJumpParams, c::ContractSpec, ag::AgentParams,
                 VS_curr[i, j] = exp(-ag.gammaS * profit) * Ec
             end
         end
+        # common per-step rescaling keeps both value functions in (0,1]
+        s = max(maximum(Vsp_curr), maximum(VS_curr))
+        if s > 0.0
+            @inbounds for i in 1:Nx
+                Vsp_curr[i] /= s
+            end
+            @inbounds for j in 1:Nu, i in 1:Nx
+                VS_curr[i, j] /= s
+            end
+        end
         Vsp_next, Vsp_curr = Vsp_curr, Vsp_next
         VS_next, VS_curr = VS_curr, VS_next
     end
 
-    VS0  = price_at_x0(VS_next, gridX, x0, 1)
-    Vsp0 = price_at_x0(reshape(Vsp_next, Nx, 1), gridX, x0, 1)
-    return VS0 / Vsp0
+    # The ratio V~_S/V~_sp is O(1) at x0 but diverges as S -> inf, so the spectral
+    # (COS) evaluation is inappropriate; form the ratio pointwise (stable, since
+    # both values share the same magnitude) and interpolate linearly at x0.
+    R = zeros(Float64, Nx)
+    @inbounds for i in 1:Nx
+        R[i] = Vsp_next[i] > 0.0 ? VS_next[i, 1] / Vsp_next[i] : 1.0
+    end
+    dx = (b - a) / Nx
+    idx = (x0 - a) / dx - 0.5               # grid points are a + (j+0.5) dx
+    i0 = clamp(floor(Int, idx), 0, Nx - 2)
+    frac = idx - i0
+    return R[i0+1] * (1.0 - frac) + R[i0+2] * frac
 end
 
 solve_spot_dct(p, c, ag; kwargs...) = nothing  # retained for API completeness

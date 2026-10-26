@@ -123,13 +123,13 @@ def fig6_convergence():
     ref = D["reference"]["P_B"]
     cd = D["conv_dct"]; cl = D["conv_lsm"]
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.2, 3.2))
-    # DCT
-    nx = np.array(cd["Nx"], float); err = np.abs(np.array(cd["P_B"]) - ref)
-    ax1.loglog(nx, err, "o-", color="C0", lw=1.2, ms=4)
-    ax1.loglog(nx, err[0] * (nx / nx[0]) ** -2, "--", color="0.5", lw=0.9, label=r"$O(N_x^{-2})$")
+    # DCT — spectral (super-algebraic) convergence
+    nx = np.array(cd["Nx"], float)
+    err = np.abs(np.array(cd["P_B"]) - ref)
+    err = np.maximum(err, 1e-14)  # avoid log(0)
+    ax1.semilogy(nx, err, "o-", color="C0", lw=1.2, ms=4)
     ax1.set_xlabel(r"grid size $N_x$"); ax1.set_ylabel(r"$|P_B - P_B^*|$")
-    ax1.set_title("DCT convergence")
-    ax1.legend()
+    ax1.set_title("DCT (spectral) convergence")
     # LSM
     np_ = np.array(cl["npath"], float); err_ = np.abs(np.array(cl["mean"]) - ref)
     std_ = np.array(cl["std"])
@@ -137,7 +137,7 @@ def fig6_convergence():
     ax2.loglog(np_, err_[0] * (np_ / np_[0]) ** -0.5, "--", color="0.5", lw=0.9, label=r"$O(P^{-1/2})$")
     ax2.set_xscale("log"); ax2.set_yscale("log")
     ax2.set_xlabel(r"paths $P$"); ax2.set_ylabel(r"$|P_B - P_B^*|$")
-    ax2.set_title("LSM convergence")
+    ax2.set_title("LSM (Monte Carlo) convergence")
     ax2.legend()
     fig.tight_layout(); fig.savefig("figures/fig6_convergence.png"); plt.close(fig)
 
