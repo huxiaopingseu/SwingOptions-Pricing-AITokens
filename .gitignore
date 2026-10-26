@@ -1,0 +1,16 @@
+# Paper-production files (excluded from the research-code repository)
+manuscript.md
+manuscript.docx
+scripts/postprocess_docx.py
+cover_letter.md
+
+# Original skeleton draft
+Pricing AI Compute Tokens*.md
+
+# Scratch / debugging
+debug*.jl
+test_*.jl
+*.Zone.Identifier
+
+# Julia local environment (if any)
+.DS_Store
